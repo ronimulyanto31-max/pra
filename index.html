@@ -1,0 +1,363 @@
+<!DOCTYPE html>
+<html lang="id">
+<head>
+<meta charset="UTF-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1.0" />
+<title>Sistem Perebutan Tiket Panahan</title>
+<style>
+  body{font-family:Arial,Helvetica,sans-serif;margin:0;background:#f5f5f5}
+  header{background:#006400;color:#fff;padding:10px;display:flex;justify-content:space-between;align-items:center}
+  nav{display:flex;background:#228B22;justify-content:center}
+  nav button{background:none;border:none;color:#fff;padding:10px 18px;cursor:pointer}
+  nav button.active,nav button:hover{background:#32CD32}
+  .container{padding:18px}
+  .sub-tabs{margin-top:12px;display:flex;gap:8px}
+  .sub-tabs button{padding:6px 10px;border:1px solid #ccc;background:#fff;border-radius:6px;cursor:pointer}
+  .sub-tabs button.active{background:#32CD32;color:#fff}
+  table{width:100%;border-collapse:collapse;margin-top:12px;background:#fff}
+  th,td{border:1px solid #e0e0e0;padding:8px;text-align:center}
+  th{background:#f7f7f7}
+  input[type=text]{width:200px;padding:6px}
+  input[type=number]{width:64px;padding:6px;text-align:center}
+  .controls{margin-top:12px;display:flex;gap:8px;align-items:center}
+  .small{font-size:13px;color:#333}
+  .btn{padding:6px 10px;border-radius:6px;border:none;cursor:pointer}
+  .btn-primary{background:#006400;color:#fff}
+  .btn-danger{background:#cc0000;color:#fff}
+  .btn-ghost{background:#eee}
+</style>
+</head>
+<body>
+
+<header>
+  <div>
+    <strong>Sistem Perebutan Tiket Panahan - Tahap 1</strong>
+  </div>
+  <div>
+    <span id="last-update">Update: -</span>
+    <button id="roleBtn" class="btn" onclick="promptPassword()">Mode: User</button>
+  </div>
+</header>
+
+<nav>
+  <button data-division="recurve" class="active" onclick="showDivision('recurve', this)">Recurve</button>
+  <button data-division="compound" onclick="showDivision('compound', this)">Compound</button>
+  <button data-division="nasional" onclick="showDivision('nasional', this)">Nasional</button>
+  <button data-division="barebow" onclick="showDivision('barebow', this)">Barebow</button>
+</nav>
+
+<main class="container">
+  <div id="controls-top" class="controls">
+    <input type="file" id="excelUpload" accept=".xlsx" />
+    <button class="btn btn-primary" onclick="saveAllToExcel()">Simpan Semua ke Excel</button>
+    <button class="btn btn-ghost" onclick="saveCurrentViewPDF()">Simpan Lihat Saat Ini ke PDF</button>
+    <button class="btn" onclick="resetData()">Reset</button>
+  </div>
+
+  <div id="content-area"></div>
+</main>
+
+<!-- libs -->
+<script src="https://cdnjs.cloudflare.com/ajax/libs/xlsx/0.18.5/xlsx.full.min.js"></script>
+<script src="https://cdnjs.cloudflare.com/ajax/libs/jspdf/2.5.1/jspdf.umd.min.js"></script>
+<script src="https://cdnjs.cloudflare.com/ajax/libs/jspdf-autotable/3.5.25/jspdf.plugin.autotable.min.js"></script>
+
+<script>
+// --- Configuration & Data Model ---
+const DIVISIONS = ['recurve','compound','nasional','barebow'];
+const GENDERS = ['putra','putri'];
+const adminPassword = 'panahan123';
+const MAX_VALUE = 3; // maximum per cell (0..3)
+let isAdmin = false;
+
+// districts list (shared across divisions/genders)
+let districts = ['Semarang','Magelang'];
+
+// counts[division][gender] = array of arrays where each inner array aligns with districts and contains counts per column
+let counts = {}; // will be initialized
+
+// store initial snapshot for Reset
+let initialSnapshot = null;
+
+function columnsForDivision(div){
+  if (div === 'barebow') return ['Wild Card','Eliminasi Mix Team','Kualifikasi Individu','Eliminasi Individu'];
+  return ['Wild Card','Kualifikasi Beregu','Eliminasi Beregu','Eliminasi Individu'];
+}
+
+function getDefaultCountsForDivision(div){
+  const cols = columnsForDivision(div).length;
+  return new Array(cols).fill(0);
+}
+
+function initCounts(){
+  counts = {};
+  DIVISIONS.forEach(div => {
+    counts[div] = {};
+    GENDERS.forEach(g => {
+      counts[div][g] = districts.map((d,i) => getDefaultCountsForDivision(div).slice());
+    });
+  });
+}
+
+// initialize with sample values so UI not empty
+function seedSampleData(){
+  initCounts();
+  // sample: semarang: [1,1,1,2], magelang: [0,1,0,1]
+  DIVISIONS.forEach(div => {
+    GENDERS.forEach(g => {
+      if (districts.length >= 1) counts[div][g][0] = [1,1,1,2].slice(0, columnsForDivision(div).length);
+      if (districts.length >= 2) counts[div][g][1] = [0,1,0,1].slice(0, columnsForDivision(div).length);
+    });
+  });
+}
+
+function takeSnapshot(){
+  initialSnapshot = {
+    districts: JSON.parse(JSON.stringify(districts)),
+    counts: JSON.parse(JSON.stringify(counts))
+  };
+}
+
+// --- Utility ---
+function updateTimestamp(){
+  document.getElementById('last-update').innerText = 'Update: ' + (new Date()).toLocaleString();
+}
+
+function clamp(v){
+  let n = parseInt(v);
+  if (isNaN(n)) return 0;
+  if (n < 0) return 0;
+  if (n > MAX_VALUE) return MAX_VALUE;
+  return n;
+}
+
+// --- Role / Password ---
+function promptPassword(){
+  if (!isAdmin){
+    const pass = prompt('Masukkan password Admin:');
+    if (pass === adminPassword){ isAdmin = true; alert('Mode Admin aktif'); }
+    else { alert('Password salah'); return; }
+  } else { isAdmin = false; alert('Kembali ke mode User'); }
+  document.getElementById('roleBtn').innerText = 'Mode: ' + (isAdmin ? 'Admin' : 'User');
+  renderCurrentView();
+}
+
+// --- Render / UI ---
+let currentDivision = 'recurve';
+let currentGender = 'putra';
+
+function showDivision(div, btn){
+  currentDivision = div;
+  // manage nav active
+  document.querySelectorAll('nav button').forEach(b => b.classList.remove('active'));
+  if (btn && btn.classList) btn.classList.add('active');
+  // render sub-tabs + table
+  renderCurrentView();
+}
+
+function showCategory(div, gender, btn){
+  currentDivision = div;
+  currentGender = gender;
+  document.querySelectorAll('.sub-tabs button').forEach(b => b.classList.remove('active'));
+  if (btn && btn.classList) btn.classList.add('active');
+  renderCurrentView();
+}
+
+function renderCurrentView(){
+  const div = currentDivision;
+  const gender = currentGender;
+  const cols = columnsForDivision(div);
+  let html = '';
+  // controls: add district (admin only) and import hint
+  html += `<div class="controls"><div class="small">Divisi: <strong>${div.toUpperCase()}</strong> — Kategori: <strong>${gender}</strong></div>`;
+  html += `<div style="margin-left:auto;display:flex;gap:8px;align-items:center">`;
+  html += `<input id="newDistrictName" placeholder="Nama Kab/Kota baru" ${isAdmin? '': 'disabled'}>`;
+  html += `<button class="btn btn-primary" ${isAdmin? '': 'disabled'} onclick="addDistrict()">Tambah Kab/Kota</button>`;
+  html += `</div></div>`;
+
+  // sub-tabs
+  html += `<div class="sub-tabs"><button class="active" onclick="showCategory('${div}','putra', this)">Putra</button><button onclick="showCategory('${div}','putri', this)">Putri</button></div>`;
+
+  // table header
+  html += `<table><tr><th>No</th><th>Kabupaten/Kota</th>`;
+  cols.forEach(c => html += `<th>${c}</th>`);
+  html += `<th>Total</th><th>Act</th></tr>`;
+
+  // rows
+  districts.forEach((name, idx) => {
+    const rowCounts = counts[div][gender][idx] || getDefaultCountsForDivision(div);
+    const total = rowCounts.reduce((a,b)=>a+b,0);
+    html += `<tr id="row-${idx}"><td>${idx+1}</td>`;
+    html += `<td><input type="text" value="${escapeHtml(name)}" ${isAdmin? '': 'disabled'} onchange="onDistrictNameChange(${idx}, this.value)"></td>`;
+    rowCounts.forEach((val,ci)=>{
+      html += `<td><input type="number" min="0" max="${MAX_VALUE}" value="${val}" ${isAdmin? '': 'disabled'} onchange="onValueChange('${div}','${gender}',${idx},${ci},this)"></td>`;
+    });
+    html += `<td class="total">${total}</td>`;
+    html += `<td>`;
+    if (isAdmin) html += `<button class="btn btn-danger" onclick="removeDistrict(${idx})">Hapus</button>`;
+    html += `</td>`;
+    html += `</tr>`;
+  });
+  html += `</table>`;
+
+  document.getElementById('content-area').innerHTML = html;
+  updateTimestamp();
+}
+
+// --- Actions ---
+function onDistrictNameChange(index, value){
+  districts[index] = value.trim();
+  // re-render so name propagated to all views
+  renderCurrentView();
+  updateTimestamp();
+}
+
+function onValueChange(div, gender, index, colIndex, input){
+  if (!isAdmin) return;
+  const v = clamp(input.value);
+  input.value = v;
+  if (!counts[div]) counts[div] = {};
+  if (!counts[div][gender]) counts[div][gender] = districts.map(()=> getDefaultCountsForDivision(div));
+  counts[div][gender][index][colIndex] = v;
+  // update total cell
+  const row = document.getElementById('row-' + index);
+  if (row) {
+    const sum = counts[div][gender][index].reduce((a,b)=>a+b,0);
+    const totalCell = row.querySelector('.total');
+    if (totalCell) totalCell.innerText = sum;
+  }
+  updateTimestamp();
+}
+
+function addDistrict(){
+  if (!isAdmin){ alert('Hanya admin yang dapat menambah kabupaten/kota'); return; }
+  const input = document.getElementById('newDistrictName');
+  const name = (input && input.value.trim()) || ('Kabupaten ' + (districts.length+1));
+  districts.push(name);
+  // append default counts for all divisions/genders
+  DIVISIONS.forEach(div => {
+    GENDERS.forEach(g => {
+      if (!counts[div]) counts[div] = {};
+      if (!counts[div][g]) counts[div][g] = [];
+      counts[div][g].push(getDefaultCountsForDivision(div));
+    });
+  });
+  if (input) input.value = '';
+  renderCurrentView();
+  updateTimestamp();
+}
+
+function removeDistrict(index){
+  if (!isAdmin){ alert('Hanya admin yang dapat menghapus kabupaten/kota'); return; }
+  if (!confirm('Hapus kabupaten/kota ini?')) return;
+  districts.splice(index,1);
+  DIVISIONS.forEach(div => {
+    GENDERS.forEach(g => {
+      if (counts[div] && counts[div][g]) counts[div][g].splice(index,1);
+    });
+  });
+  renderCurrentView();
+  updateTimestamp();
+}
+
+function resetData(){
+  if (!initialSnapshot) return;
+  districts = JSON.parse(JSON.stringify(initialSnapshot.districts));
+  counts = JSON.parse(JSON.stringify(initialSnapshot.counts));
+  renderCurrentView();
+  updateTimestamp();
+}
+
+// --- Import from Excel (simple: read first column as district names) ---
+document.getElementById('excelUpload').addEventListener('change', function(e){
+  const file = e.target.files[0];
+  if (!file) return;
+  const reader = new FileReader();
+  reader.onload = function(evt){
+    const data = new Uint8Array(evt.target.result);
+    const workbook = XLSX.read(data, { type: 'array' });
+    const sheet = workbook.Sheets[workbook.SheetNames[0]];
+    const rows = XLSX.utils.sheet_to_json(sheet, { header:1 });
+    // take first column values (skip header if present)
+    const names = [];
+    rows.forEach((r, idx) => {
+      const val = r[0];
+      if (val && String(val).trim() !== '') names.push(String(val).trim());
+    });
+    if (names.length === 0){ alert('Tidak ada nama kab/kota yang ditemukan di kolom pertama.'); return; }
+    // replace districts and reinit counts
+    districts = names;
+    initCounts();
+    renderCurrentView();
+    updateTimestamp();
+  };
+  reader.readAsArrayBuffer(file);
+});
+
+// --- Export to Excel (all divisions/genders into separate sheets) ---
+function saveAllToExcel(){
+  const wb = XLSX.utils.book_new();
+  DIVISIONS.forEach(div => {
+    GENDERS.forEach(gender => {
+      const cols = columnsForDivision(div);
+      const aoa = [];
+      aoa.push(['No','Kabupaten/Kota', ...cols, 'Total']);
+      districts.forEach((name, idx) => {
+        const vals = (counts[div] && counts[div][gender] && counts[div][gender][idx]) ? counts[div][gender][idx] : getDefaultCountsForDivision(div);
+        const total = vals.reduce((a,b)=>a+b,0);
+        aoa.push([idx+1, name, ...vals, total]);
+      });
+      const sheet = XLSX.utils.aoa_to_sheet(aoa);
+      const sheetName = (div + '_' + gender).slice(0,31);
+      XLSX.utils.book_append_sheet(wb, sheet, sheetName);
+    });
+  });
+  XLSX.writeFile(wb, 'tiket_all_divisions.xlsx');
+}
+
+// --- Export current view to PDF ---
+function saveCurrentViewPDF(){
+  const div = currentDivision;
+  const gender = currentGender;
+  const cols = columnsForDivision(div);
+  const head = ['No','Kabupaten/Kota', ...cols, 'Total'];
+  const body = districts.map((name, idx) => {
+    const vals = (counts[div] && counts[div][gender] && counts[div][gender][idx]) ? counts[div][gender][idx] : getDefaultCountsForDivision(div);
+    const total = vals.reduce((a,b)=>a+b,0);
+    return [idx+1, name, ...vals, total];
+  });
+  const { jsPDF } = window.jspdf;
+  const doc = new jsPDF();
+  doc.text('Data Tiket - ' + div.toUpperCase() + ' - ' + gender.toUpperCase(), 10, 10);
+  doc.autoTable({ head: [head], body: body, startY: 16 });
+  doc.save('tiket_' + div + '_' + gender + '.pdf');
+}
+
+// --- Helpers ---
+function escapeHtml(str){
+  return String(str).replace(/[&<>"']/g, ch => ({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":"&#39;"}[ch]));
+}
+
+// --- Init ---
+seedSampleData();
+initCounts();
+// ensure counts reflect seeded values
+seedSampleData();
+initCounts();
+// re-seed to match intended sample values
+seedSampleData();
+initCounts();
+// apply sample values again (to ensure proper shape)
+seedSampleData();
+
+takeSnapshot();
+
+// initial render
+document.addEventListener('DOMContentLoaded', function(){
+  showDivision('recurve', document.querySelector('nav button.active'));
+  updateTimestamp();
+});
+
+</script>
+</body>
+</html>
