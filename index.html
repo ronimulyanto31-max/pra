@@ -13,7 +13,7 @@
   .container{padding:18px}
   .sub-tabs{margin-top:12px;display:flex;gap:8px}
   .sub-tabs button{padding:6px 10px;border:1px solid #ccc;background:#fff;border-radius:6px;cursor:pointer}
-  .sub-tabs button.active{background:#32CD32;color:#fff}
+  .sub-tabs button.active{background:#32CD32;color:#fff;border-color:#32CD32}
   table{width:100%;border-collapse:collapse;margin-top:12px;background:#fff}
   th,td{border:1px solid #e0e0e0;padding:8px;text-align:center}
   th{background:#f7f7f7}
@@ -48,8 +48,6 @@
 
 <main class="container">
   <div id="controls-top" class="controls">
-    <input type="file" id="excelUpload" accept=".xlsx" />
-    <button class="btn btn-primary" onclick="saveAllToExcel()">Simpan Semua ke Excel</button>
     <button class="btn btn-ghost" onclick="saveCurrentViewPDF()">Simpan Lihat Saat Ini ke PDF</button>
     <button class="btn" onclick="resetData()">Reset</button>
   </div>
@@ -58,7 +56,6 @@
 </main>
 
 <!-- libs -->
-<script src="https://cdnjs.cloudflare.com/ajax/libs/xlsx/0.18.5/xlsx.full.min.js"></script>
 <script src="https://cdnjs.cloudflare.com/ajax/libs/jspdf/2.5.1/jspdf.umd.min.js"></script>
 <script src="https://cdnjs.cloudflare.com/ajax/libs/jspdf-autotable/3.5.25/jspdf.plugin.autotable.min.js"></script>
 
@@ -78,6 +75,37 @@ let counts = {}; // will be initialized
 
 // store initial snapshot for Reset
 let initialSnapshot = null;
+
+// --- Data Storage Functions ---
+function saveDataToStorage() {
+  const data = {
+    districts: districts,
+    counts: counts,
+    lastUpdate: new Date().toISOString()
+  };
+  localStorage.setItem('archeryTicketData', JSON.stringify(data));
+}
+
+function loadDataFromStorage() {
+  const savedData = localStorage.getItem('archeryTicketData');
+  if (savedData) {
+    try {
+      const data = JSON.parse(savedData);
+      districts = data.districts || districts;
+      counts = data.counts || {};
+      
+      // Update timestamp if available
+      if (data.lastUpdate) {
+        document.getElementById('last-update').innerText = 'Update: ' + new Date(data.lastUpdate).toLocaleString();
+      }
+      
+      return true;
+    } catch (e) {
+      console.error('Error loading saved data:', e);
+    }
+  }
+  return false;
+}
 
 function columnsForDivision(div){
   if (div === 'barebow') return ['Wild Card','Eliminasi Mix Team','Kualifikasi Individu','Eliminasi Individu'];
@@ -120,7 +148,9 @@ function takeSnapshot(){
 
 // --- Utility ---
 function updateTimestamp(){
-  document.getElementById('last-update').innerText = 'Update: ' + (new Date()).toLocaleString();
+  const now = new Date();
+  document.getElementById('last-update').innerText = 'Update: ' + now.toLocaleString();
+  saveDataToStorage(); // Save data whenever timestamp is updated
 }
 
 function clamp(v){
@@ -158,8 +188,16 @@ function showDivision(div, btn){
 function showCategory(div, gender, btn){
   currentDivision = div;
   currentGender = gender;
-  document.querySelectorAll('.sub-tabs button').forEach(b => b.classList.remove('active'));
-  if (btn && btn.classList) btn.classList.add('active');
+  
+  // Update active state for gender buttons
+  const genderButtons = document.querySelectorAll('.sub-tabs button');
+  genderButtons.forEach(b => {
+    b.classList.remove('active');
+    if (b.textContent.toLowerCase() === gender) {
+      b.classList.add('active');
+    }
+  });
+  
   renderCurrentView();
 }
 
@@ -176,7 +214,10 @@ function renderCurrentView(){
   html += `</div></div>`;
 
   // sub-tabs
-  html += `<div class="sub-tabs"><button class="active" onclick="showCategory('${div}','putra', this)">Putra</button><button onclick="showCategory('${div}','putri', this)">Putri</button></div>`;
+  html += `<div class="sub-tabs">
+    <button class="${gender === 'putra' ? 'active' : ''}" onclick="showCategory('${div}','putra', this)">Putra</button>
+    <button class="${gender === 'putri' ? 'active' : ''}" onclick="showCategory('${div}','putri', this)">Putri</button>
+  </div>`;
 
   // table header
   html += `<table><tr><th>No</th><th>Kabupaten/Kota</th>`;
@@ -262,57 +303,16 @@ function removeDistrict(index){
 
 function resetData(){
   if (!initialSnapshot) return;
+  if (!confirm('Yakin ingin mereset semua data ke kondisi awal?')) return;
+  
   districts = JSON.parse(JSON.stringify(initialSnapshot.districts));
   counts = JSON.parse(JSON.stringify(initialSnapshot.counts));
+  
+  // Clear saved data from storage
+  localStorage.removeItem('archeryTicketData');
+  
   renderCurrentView();
   updateTimestamp();
-}
-
-// --- Import from Excel (simple: read first column as district names) ---
-document.getElementById('excelUpload').addEventListener('change', function(e){
-  const file = e.target.files[0];
-  if (!file) return;
-  const reader = new FileReader();
-  reader.onload = function(evt){
-    const data = new Uint8Array(evt.target.result);
-    const workbook = XLSX.read(data, { type: 'array' });
-    const sheet = workbook.Sheets[workbook.SheetNames[0]];
-    const rows = XLSX.utils.sheet_to_json(sheet, { header:1 });
-    // take first column values (skip header if present)
-    const names = [];
-    rows.forEach((r, idx) => {
-      const val = r[0];
-      if (val && String(val).trim() !== '') names.push(String(val).trim());
-    });
-    if (names.length === 0){ alert('Tidak ada nama kab/kota yang ditemukan di kolom pertama.'); return; }
-    // replace districts and reinit counts
-    districts = names;
-    initCounts();
-    renderCurrentView();
-    updateTimestamp();
-  };
-  reader.readAsArrayBuffer(file);
-});
-
-// --- Export to Excel (all divisions/genders into separate sheets) ---
-function saveAllToExcel(){
-  const wb = XLSX.utils.book_new();
-  DIVISIONS.forEach(div => {
-    GENDERS.forEach(gender => {
-      const cols = columnsForDivision(div);
-      const aoa = [];
-      aoa.push(['No','Kabupaten/Kota', ...cols, 'Total']);
-      districts.forEach((name, idx) => {
-        const vals = (counts[div] && counts[div][gender] && counts[div][gender][idx]) ? counts[div][gender][idx] : getDefaultCountsForDivision(div);
-        const total = vals.reduce((a,b)=>a+b,0);
-        aoa.push([idx+1, name, ...vals, total]);
-      });
-      const sheet = XLSX.utils.aoa_to_sheet(aoa);
-      const sheetName = (div + '_' + gender).slice(0,31);
-      XLSX.utils.book_append_sheet(wb, sheet, sheetName);
-    });
-  });
-  XLSX.writeFile(wb, 'tiket_all_divisions.xlsx');
 }
 
 // --- Export current view to PDF ---
@@ -339,16 +339,22 @@ function escapeHtml(str){
 }
 
 // --- Init ---
-seedSampleData();
-initCounts();
-// ensure counts reflect seeded values
-seedSampleData();
-initCounts();
-// re-seed to match intended sample values
-seedSampleData();
-initCounts();
-// apply sample values again (to ensure proper shape)
-seedSampleData();
+// Try to load saved data first
+const hasSavedData = loadDataFromStorage();
+
+if (!hasSavedData) {
+  // If no saved data, use sample data
+  seedSampleData();
+  initCounts();
+  // ensure counts reflect seeded values
+  seedSampleData();
+  initCounts();
+  // re-seed to match intended sample values
+  seedSampleData();
+  initCounts();
+  // apply sample values again (to ensure proper shape)
+  seedSampleData();
+}
 
 takeSnapshot();
 
